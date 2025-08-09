@@ -94,5 +94,15 @@ uci commit
 FILE_PATH="/etc/openwrt_release"
 NEW_DESCRIPTION="Compiled by wukongdaily"
 sed -i "s/DISTRIB_DESCRIPTION='[^']*'/DISTRIB_DESCRIPTION='$NEW_DESCRIPTION'/" "$FILE_PATH"
+# 固定 LAN 为 192.168.100.1/24（不改 DHCP）
+uci -q batch <<'EOF'
+set network.lan.proto='static'
+set network.lan.ipaddr='192.168.100.1'
+set network.lan.netmask='255.255.255.0'
+delete network.lan.ip6assign
+commit network
+EOF
 
+# 可选：立即生效（不影响第一次启动自动生效）
+/etc/init.d/network reload >/dev/null 2>&1 || true
 exit 0
