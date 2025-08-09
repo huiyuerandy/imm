@@ -1,108 +1,25 @@
-#!/bin/sh
-# 该脚本为immortalwrt首次启动时 运行的脚本 即 /etc/uci-defaults/99-custom.sh
-# 设置默认防火墙规则，方便虚拟机首次访问 WebUI
+# 设置默认wan口防火墙打开 方便虚拟机用户首次访问webui
 uci set firewall.@zone[1].input='ACCEPT'
-
-# 设置主机名映射，解决安卓原生 TV 无法联网的问题
+uci commit firewall
+# 设置主机名映射 解决安卓原生TV首次连不上网的问题
 uci add dhcp domain
 uci set "dhcp.@domain[-1].name=time.android.com"
 uci set "dhcp.@domain[-1].ip=203.107.6.88"
-
-# 检查配置文件是否存在
-SETTINGS_FILE="/etc/config/pppoe-settings"
-if [ ! -f "$SETTINGS_FILE" ]; then
-    echo "PPPoE settings file not found. Skipping." >> $LOGFILE
-else
-   # 读取pppoe信息(由build.sh写入)
-   . "$SETTINGS_FILE"
+uci commit dhcp
+# 根据网卡数量配置网络
+count=0
+for iface in $(ls /sys/class/net | grep -v lo); do
+  # 检查是否有对应的设备，并且排除无线网卡
+  if [ -e /sys/class/net/$iface/device ] && [[ $iface == eth* || $iface == en* ]]; then
+    count=$((count + 1))
+  fi
+done
+if [ "$count" -eq 1 ]; then
+    # 单个网卡，设置为 DHCP 模式
+    uci set network.lan.ipaddr='192.168.100.1'
+    uci commit network
+elif [ "$count" -gt 1 ]; then
+    # 多个网卡，保持静态 IP
+    uci set network.lan.ipaddr='192.168.100.1'
+    uci commit network
 fi
-# 无需判断网卡数量 因为glinet是多网口
-uci set network.lan.ipaddr='192.168.8.1'
-echo "set 192.168.8.1 at $(date)" >> $LOGFILE
-# 判断是否启用 PPPoE
-echo "print enable_pppoe value=== $enable_pppoe" >> $LOGFILE
-if [ "$enable_pppoe" = "yes" ]; then
-    echo "PPPoE is enabled at $(date)" >> $LOGFILE
-    # 设置拨号信息
-    uci set network.wan.proto='pppoe'                
-    uci set network.wan.username=$pppoe_account     
-    uci set network.wan.password=$pppoe_password     
-    uci set network.wan.peerdns='1'                  
-    uci set network.wan.auto='1' 
-    echo "PPPoE configuration completed successfully." >> $LOGFILE
-else
-    echo "PPPoE is not enabled. Skipping configuration." >> $LOGFILE
-fi
-
-# 若安装了dockerd 则设置docker的防火墙规则
-# 扩大docker涵盖的子网范围 '172.16.0.0/12'
-# 方便各类docker容器的端口顺利通过防火墙 
-if command -v dockerd >/dev/null 2>&1; then
-    echo "检测到 Docker，正在配置防火墙规则..."
-    FW_FILE="/etc/config/firewall"
-
-    # 删除所有名为 docker 的 zone
-    uci delete firewall.docker
-
-    # 先获取所有 forwarding 索引，倒序排列删除
-    for idx in $(uci show firewall | grep "=forwarding" | cut -d[ -f2 | cut -d] -f1 | sort -rn); do
-        src=$(uci get firewall.@forwarding[$idx].src 2>/dev/null)
-        dest=$(uci get firewall.@forwarding[$idx].dest 2>/dev/null)
-        echo "Checking forwarding index $idx: src=$src dest=$dest"
-        if [ "$src" = "docker" ] || [ "$dest" = "docker" ]; then
-            echo "Deleting forwarding @forwarding[$idx]"
-            uci delete firewall.@forwarding[$idx]
-        fi
-    done
-    # 提交删除
-    uci commit firewall
-    # 追加新的 zone + forwarding 配置
-    cat <<EOF >>"$FW_FILE"
-
-config zone 'docker'
-  option input 'ACCEPT'
-  option output 'ACCEPT'
-  option forward 'ACCEPT'
-  option name 'docker'
-  list subnet '172.16.0.0/12'
-
-config forwarding
-  option src 'docker'
-  option dest 'lan'
-
-config forwarding
-  option src 'docker'
-  option dest 'wan'
-
-config forwarding
-  option src 'lan'
-  option dest 'docker'
-EOF
-
-else
-    echo "未检测到 Docker，跳过防火墙配置。"
-fi
-
-# 设置所有网口可访问网页终端
-uci delete ttyd.@ttyd[0].interface
-
-# 设置所有网口可连接 SSH
-uci set dropbear.@dropbear[0].Interface=''
-uci commit
-
-# 设置编译作者信息
-FILE_PATH="/etc/openwrt_release"
-NEW_DESCRIPTION="Compiled by wukongdaily"
-sed -i "s/DISTRIB_DESCRIPTION='[^']*'/DISTRIB_DESCRIPTION='$NEW_DESCRIPTION'/" "$FILE_PATH"
-# 固定 LAN 为 192.168.100.1/24（不改 DHCP）
-uci -q batch <<'EOF'
-set network.lan.proto='static'
-set network.lan.ipaddr='192.168.100.1'
-set network.lan.netmask='255.255.255.0'
-delete network.lan.ip6assign
-commit network
-EOF
-
-# 可选：立即生效（不影响第一次启动自动生效）
-/etc/init.d/network reload >/dev/null 2>&1 || true
-exit 0
